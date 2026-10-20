@@ -5,8 +5,7 @@ A zsh filter that replaces [Marked](https://markedapp.com)’s input with a [Mar
 ## Setup
 
 1. Edit `curators` beside `markdown-curator-filter`. Each line contains a curator name, whitespace, and an absolute vault directory. Paths may contain spaces; do not quote them. Blank lines and lines starting with `#` are ignored. Curator names may contain letters, numbers, `.`, `_`, `~`, and `-`.
-2. Configure Marked's custom preprocessor to run the absolute path to
-   `markdown-curator-filter`. Keep `curators` beside the script.
+2. Configure Marked's custom preprocessor to run the absolute path to `markdown-curator-filter`. Keep `curators` beside the script.
 3. Run Markdown Curator on `localhost:7767`.
 
 The filter checks `MARKED_PATH` first. If it is missing or empty, input passes through unchanged. Missing configuration or an unmatched document also passes input through unchanged.
