@@ -1,0 +1,3 @@
+# Curator name followed by whitespace and its absolute vault directory.
+# Paths may contain spaces. Do not quote paths or add inline comments.
+example /Users/me/path/to/Example/Notes

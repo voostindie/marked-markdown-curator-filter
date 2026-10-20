@@ -1,0 +1,182 @@
+#!/bin/zsh --no-rcs
+
+emulate -R zsh
+
+filter_source=${0:A:h}/markdown-curator-filter
+suite_dir=$(mktemp -d "${TMPDIR:-/tmp}/curator-tests.XXXXXXXX") || exit 1
+trap 'rm -rf -- "$suite_dir"' EXIT
+trap 'exit 1' HUP INT TERM
+
+fail() {
+  print -ru2 -- "$*"
+  exit 1
+}
+
+setup() {
+  work_dir="$suite_dir/$test_name"
+  mkdir -p "$work_dir" || fail 'Cannot create test directory'
+  cp "$filter_source" "$work_dir/markdown-curator-filter" || fail 'Cannot copy filter'
+  print -r -- 'personal /vault/Notes' > "$work_dir/curators"
+  printf '# Original\n\n  spaces \\ and tabs\t\nno final newline' > "$work_dir/input"
+  printf '# Export\n\n' > "$work_dir/body"
+  cat > "$work_dir/curl" <<'CURL'
+#!/bin/zsh --no-rcs
+emulate -R zsh
+printf '%s\0' "$@" > "$ARGS_FILE"
+while (( $# )); do
+  if [[ "$1" == --output ]]; then
+    cp "$BODY_FILE" "$2" || exit 1
+    break
+  fi
+  shift
+done
+printf '%s' "${HTTP_STATUS:-200}"
+exit "${CURL_STATUS:-0}"
+CURL
+  chmod +x "$work_dir/curl" || fail 'Cannot make fake curl executable'
+}
+
+# Extra arguments are environment assignments; MARKED_PATH is unset by default.
+run_filter() {
+  (
+    cd / || exit 1
+    env -u MARKED_PATH -u HTTP_STATUS -u CURL_STATUS \
+      PATH="$work_dir:/usr/bin:/bin" TMPDIR="$work_dir" \
+      ARGS_FILE="$work_dir/args" BODY_FILE="$work_dir/body" "$@" \
+      /bin/zsh --no-rcs "$work_dir/markdown-curator-filter" \
+      < "$work_dir/input" > "$work_dir/output" 2> "$work_dir/stderr"
+  ) || fail 'Filter exited with a nonzero status'
+  [[ ! -s "$work_dir/stderr" ]] || fail "Unexpected stderr: $(<"$work_dir/stderr")"
+  local -a leftovers=("$work_dir"/markdown-curator.*(N))
+  (( ${#leftovers} == 0 )) || fail 'Filter left temporary response files behind'
+}
+
+assert_output() {
+  cmp -s "$1" "$work_dir/output" || fail 'Output differs from expected bytes'
+}
+
+assert_no_curl() {
+  [[ ! -e "$work_dir/args" ]] || fail 'Unexpected curl invocation'
+}
+
+read_args() {
+  args=()
+  local arg
+  [[ -f "$work_dir/args" ]] || fail 'Expected curl invocation'
+  while IFS= read -r -d '' arg; do
+    args+=("$arg")
+  done < "$work_dir/args"
+}
+
+assert_option() {
+  local index=${args[(Ie)$1]}
+  (( index > 0 )) || fail "Missing curl option: $1"
+  [[ "${args[index+1]}" == "$2" ]] || fail "Unexpected value for $1"
+}
+
+test_missing_or_empty_environment() {
+  run_filter
+  assert_output "$work_dir/input"
+  assert_no_curl
+  run_filter MARKED_PATH=
+  assert_output "$work_dir/input"
+  assert_no_curl
+}
+
+test_missing_configuration() {
+  rm "$work_dir/curators"
+  run_filter MARKED_PATH=/vault/Notes/Document.md
+  assert_output "$work_dir/input"
+  assert_no_curl
+}
+
+test_unknown_curator_and_directory_boundary() {
+  local document_path
+  for document_path in /other/Document.md /vault/Notes-other/Document.md; do
+    run_filter "MARKED_PATH=$document_path"
+    assert_output "$work_dir/input"
+    assert_no_curl
+  done
+}
+
+test_export_and_request_arguments() {
+  run_filter 'MARKED_PATH=/vault/Notes/My & Document.v2.md'
+  assert_output "$work_dir/body"
+  read_args
+  (( ${args[(Ie)--get]} > 0 )) || fail 'Missing --get'
+  (( ${args[(Ie)--fail]} > 0 )) || fail 'Missing --fail'
+  assert_option --header 'Accept: text/markdown'
+  assert_option --data-urlencode 'document=My & Document.v2'
+  [[ "${args[-1]}" == http://localhost:7767/curators/personal/queries/export ]] \
+    || fail 'Unexpected export URL'
+}
+
+test_longest_path_spaces_comments_and_unterminated_config() {
+  printf '# Comment\n\nparent /vault\nspecific /vault/My Notes/\nother /vault/My Notes/deeper' \
+    > "$work_dir/curators"
+  run_filter 'MARKED_PATH=/vault/My Notes/deeper/Doc.md'
+  assert_output "$work_dir/body"
+  read_args
+  [[ "${args[-1]}" == http://localhost:7767/curators/other/queries/export ]] \
+    || fail 'Did not choose the longest matching directory'
+}
+
+test_invalid_configuration_entries() {
+  printf 'bad/name /vault\nrelative vault\nmissing\n' > "$work_dir/curators"
+  run_filter MARKED_PATH=/vault/Doc.md
+  assert_output "$work_dir/input"
+  assert_no_curl
+}
+
+test_failed_or_invalid_responses() {
+  local assignment
+  for assignment in CURL_STATUS=7 CURL_STATUS=28 HTTP_STATUS=500 HTTP_STATUS=302; do
+    run_filter MARKED_PATH=/vault/Notes/Doc.md "$assignment"
+    assert_output "$work_dir/input"
+  done
+  printf '' > "$work_dir/body"
+  run_filter MARKED_PATH=/vault/Notes/Doc.md
+  assert_output "$work_dir/input"
+  printf ' \t\r\n' > "$work_dir/body"
+  run_filter MARKED_PATH=/vault/Notes/Doc.md
+  assert_output "$work_dir/input"
+}
+
+test_export_without_final_newline() {
+  printf '# Export' > "$work_dir/body"
+  run_filter MARKED_PATH=/vault/Notes/Doc.md
+  assert_output "$work_dir/body"
+}
+
+test_extensionless_document() {
+  run_filter MARKED_PATH=/vault/Notes/README
+  assert_output "$work_dir/body"
+  read_args
+  assert_option --data-urlencode document=README
+}
+
+tests=(
+  test_missing_or_empty_environment
+  test_missing_configuration
+  test_unknown_curator_and_directory_boundary
+  test_export_and_request_arguments
+  test_longest_path_spaces_comments_and_unterminated_config
+  test_invalid_configuration_entries
+  test_failed_or_invalid_responses
+  test_export_without_final_newline
+  test_extensionless_document
+)
+
+integer failures=0
+for test_name in "${tests[@]}"; do
+  (setup; "$test_name")
+  if (( $? == 0 )); then
+    print -r -- "PASS $test_name"
+  else
+    print -ru2 -- "FAIL $test_name"
+    (( failures++ ))
+  fi
+done
+
+print -r -- "${#tests} tests, $failures failures"
+(( failures == 0 ))

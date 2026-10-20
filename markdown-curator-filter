@@ -1,0 +1,54 @@
+#!/bin/zsh --no-rcs
+
+# Without Marked's document path, preserve input exactly.
+if [[ -z ${MARKED_PATH:-} ]]; then
+  exec cat
+fi
+
+emulate -R zsh
+
+# Resolve configuration relative to this script, not Marked's working directory.
+config="${0:A:h}/curators"
+[[ -r "$config" ]] || exec cat
+
+curator=''
+matched_path=''
+while read -r name directory || [[ -n "$name$directory" ]]; do
+  [[ -z "$name" || "$name" == \#* || -z "$directory" ]] && continue
+  # Curator names must be safe as a single URL path segment.
+  [[ "$name" == *[^a-zA-Z0-9._~-]* || "$directory" != /* ]] && continue
+  while [[ "$directory" != / && "$directory" == */ ]]; do
+    directory=${directory%/}
+  done
+  if [[ "$directory" == / || "$MARKED_PATH" == "$directory"/* ]]; then
+    if (( ${#directory} > ${#matched_path} )); then
+      curator=$name
+      matched_path=$directory
+    fi
+  fi
+done < "$config"
+
+[[ -n "$curator" ]] || exec cat
+
+document=${MARKED_PATH:t:r}
+document=${document}
+[[ -n "$document" ]] || exec cat
+
+response=$(mktemp "${TMPDIR:-/tmp}/markdown-curator.XXXXXXXX") || exec cat
+trap 'rm -f -- "$response"' EXIT
+trap 'exit 1' HUP INT TERM
+
+http_status=$(curl --silent --fail --get \
+  --connect-timeout 2 --max-time 10 \
+  --header 'Accept: text/markdown' \
+  --data-urlencode "document=$document" \
+  --output "$response" --write-out '%{http_code}' \
+  "http://localhost:7767/curators/$curator/queries/export")
+curl_status=$?
+
+if (( curl_status == 0 )) && [[ "$http_status" == 2[0-9][0-9] ]] \
+  && LC_ALL=C grep -q '[^[:space:]]' "$response"; then
+  cat -- "$response"
+else
+  cat
+fi
